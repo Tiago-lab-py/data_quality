@@ -1,0 +1,9 @@
+streamlit
+pandas
+numpy
+openpyxl
+pyarrow
+pytest
+oracledb
+polars
+python-dotenv
