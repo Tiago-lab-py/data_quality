@@ -70,6 +70,28 @@ def sync_background_state_to_session():
         st.session_state.extraction_running = background_extraction_state['running']
 
 
+def get_raw_parquet_path(project_root: Path):
+    raw_dir = project_root / "data" / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+
+    # Prioridade: arquivo padrão, depois teste.
+    preferred_files = [
+        raw_dir / "dic_fic_uc.parquet",
+        raw_dir / "dic_fic_uc_teste.parquet",
+    ]
+    for parquet_path in preferred_files:
+        if parquet_path.exists():
+            return parquet_path
+
+    # Fallback: qualquer parquet mais recente.
+    parquet_files = sorted(
+        raw_dir.glob("*.parquet"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    return parquet_files[0] if parquet_files else None
+
+
 def run_extraction_background(data_mes: str, filename: str, limit_rows):
     with background_state_lock:
         background_extraction_state['running'] = True
@@ -137,7 +159,7 @@ def run_extraction_background(data_mes: str, filename: str, limit_rows):
         append_background_log(f"📁 Arquivo: data/raw/{filename}")
         append_background_log("=" * 70)
 
-        expected_path = Path(__file__).parent.parent / 'data' / 'raw' / filename
+        expected_path = Path(__file__).resolve().parent.parent.parent / 'data' / 'raw' / filename
         if expected_path.exists():
             file_size = expected_path.stat().st_size / (1024 * 1024)
             append_background_log(f"✅ Verificação: Arquivo existe ({file_size:.2f} MB)")
@@ -343,60 +365,237 @@ with tab2:
 
     # Sincronizar estado do background thread antes de exibir
     sync_background_state_to_session()
+    st.divider()
+    st.subheader("📊 Acompanhamento da Extração")
 
-    if st.session_state.extraction_running or st.session_state.extraction_logs or st.session_state.extraction_result or st.session_state.extraction_error:
-        st.divider()
-        st.subheader("📊 Acompanhamento da Extração")
-
-        if st.session_state.extraction_running:
-            st.info("⏳ Extração em andamento... Atualizando a cada 2 segundos")
-
-            st.markdown("**Últimos Logs:**")
-            if st.session_state.extraction_logs:
-                logs_to_show = st.session_state.extraction_logs[-50:]
-                for log in logs_to_show:
-                    if "erro" in log.lower() or "falha" in log.lower():
-                        st.error(log)
-                    elif "conclu" in log.lower() or "sucesso" in log.lower() or "dados salvos" in log.lower() or "arquivo criado" in log.lower():
-                        st.success(log)
-                    elif "aviso" in log.lower() or "⚠️" in log:
-                        st.warning(log)
-                    else:
-                        st.text(log)
-            else:
-                st.write("Nenhum log ainda. Aguarde alguns segundos...")
-
-            if st.button('🔄 Atualizar status agora', use_container_width=True):
-                st.experimental_rerun()
-
-            time.sleep(2)
-            st.experimental_rerun()
-
+    if st.session_state.extraction_running:
+        st.info("⏳ Extração em andamento... Clique em Atualizar para ver o progresso.")
+    else:
+        if st.session_state.extraction_error:
+            st.error("❌ Extração Finalizada com Erro")
         else:
-            if st.session_state.extraction_error:
-                st.error("❌ Extração Finalizada com Erro")
+            st.success("✅ Extração Finalizada com Sucesso")
+
+    st.markdown("**Logs da Extração:**")
+    if st.session_state.extraction_logs:
+        logs_to_show = st.session_state.extraction_logs[-50:]
+        for log in logs_to_show:
+            if "erro" in log.lower() or "falha" in log.lower():
+                st.error(log)
+            elif "conclu" in log.lower() or "sucesso" in log.lower() or "dados salvos" in log.lower() or "arquivo criado" in log.lower():
+                st.success(log)
+            elif "aviso" in log.lower() or "⚠️" in log:
+                st.warning(log)
             else:
-                st.success("✅ Extração Finalizada com Sucesso")
+                st.text(log)
+    else:
+        st.write("Nenhum log disponível ainda. Inicie a extração e pressione Atualizar.")
 
-            with st.expander("📋 Ver Logs Completos", expanded=True):
-                st.markdown("**Histórico Completo da Extração:**")
-                for log in st.session_state.extraction_logs:
-                    if "erro" in log.lower() or "falha" in log.lower():
-                        st.error(log)
-                    elif "conclu" in log.lower() or "sucesso" in log.lower() or "dados salvos" in log.lower() or "arquivo criado" in log.lower():
-                        st.success(log)
-                    elif "aviso" in log.lower() or "⚠️" in log:
-                        st.warning(log)
-                    else:
-                        st.text(log)
+    if st.button('🔄 Atualizar status', use_container_width=True):
+        st.experimental_rerun()
 
-        st.divider()
-        if st.session_state.extraction_result:
-            st.success("✅ Extração concluída com sucesso!")
-            st.session_state['data_file'] = st.session_state.extraction_result
-            st.info(f"📁 {st.session_state.extraction_result}")
-        elif st.session_state.extraction_error:
-            st.error(f"❌ {st.session_state.extraction_error}")
+    st.divider()
+    if st.session_state.extraction_result:
+        st.success("✅ Extração concluída com sucesso!")
+        st.session_state['data_file'] = st.session_state.extraction_result
+        st.info(f"📁 {st.session_state.extraction_result}")
+    elif st.session_state.extraction_error:
+        st.error(f"❌ {st.session_state.extraction_error}")
+
+    if st.checkbox("🐞 Mostrar estado interno da extração", value=False, key="show_extraction_debug"):
+        with background_state_lock:
+            st.write("running:", background_extraction_state['running'])
+            st.write("logs_count:", len(background_extraction_state['logs']))
+            st.write("result:", background_extraction_state['result'])
+            st.write("error:", background_extraction_state['error'])
+
+    if not st.session_state.extraction_running and st.session_state.extraction_logs:
+        with st.expander("📋 Ver Logs Completos", expanded=False):
+            for log in st.session_state.extraction_logs:
+                if "erro" in log.lower() or "falha" in log.lower():
+                    st.error(log)
+                elif "conclu" in log.lower() or "sucesso" in log.lower() or "dados salvos" in log.lower() or "arquivo criado" in log.lower():
+                    st.success(log)
+                elif "aviso" in log.lower() or "⚠️" in log:
+                    st.warning(log)
+                else:
+                    st.text(log)
+
+
+def processar_dados_hcai(raw_path, processed_dir, converter_datas, converter_decimal,
+                        validar_sobreposicao, consolidar_duplicados):
+    """Processa os dados HCAI aplicando transformações e validações"""
+
+    logs = []
+    logs.append("=" * 70)
+    logs.append("🔄 PROCESSAMENTO DE DADOS HCAI")
+    logs.append("=" * 70)
+    logs.append(f"📁 Arquivo de entrada: {raw_path}")
+    logs.append(f"📁 Diretório de saída: {processed_dir}")
+    logs.append("")
+
+    log_container = st.empty()
+
+    def update_logs():
+        with log_container.container():
+            for log in logs[-15:]:
+                if "erro" in log.lower() or "falha" in log.lower():
+                    st.error(log)
+                elif "sucesso" in log.lower() or "conclu" in log.lower():
+                    st.success(log)
+                elif "aviso" in log.lower() or "atenção" in log.lower():
+                    st.warning(log)
+                else:
+                    st.text(log)
+
+    try:
+        logs.append("📖 Carregando dados do arquivo Parquet...")
+        update_logs()
+
+        df = pl.read_parquet(raw_path)
+        registros_iniciais = len(df)
+        logs.append(f"✅ Dados carregados: {registros_iniciais:,} registros")
+        update_logs()
+
+        if converter_datas:
+            logs.append("")
+            logs.append("📅 Convertendo colunas para datetime...")
+            update_logs()
+
+            colunas_datetime = ['DTHR_INICIO_INTRP_UC', 'DATA_HORA_FIM_INT']
+            for col in colunas_datetime:
+                if col in df.columns:
+                    try:
+                        df = df.with_columns(pl.col(col).str.strptime(pl.Datetime, "%Y-%m-%d %H:%M:%S").alias(col))
+                        logs.append(f"✅ {col}: conversão direta realizada")
+                    except Exception:
+                        try:
+                            df = df.with_columns(pl.col(col).str.strptime(pl.Datetime, "%d/%m/%Y %H:%M:%S").alias(col))
+                            logs.append(f"✅ {col}: conversão DD/MM/YYYY realizada")
+                        except Exception:
+                            try:
+                                df = df.with_columns(pl.col(col).str.strptime(pl.Datetime, "%Y%m%d %H:%M:%S").alias(col))
+                                logs.append(f"✅ {col}: conversão YYYYMMDD realizada")
+                            except Exception as e:
+                                logs.append(f"⚠️  {col}: falha na conversão - {str(e)}")
+                else:
+                    logs.append(f"⚠️  Coluna {col} não encontrada")
+            update_logs()
+
+        if converter_decimal:
+            logs.append("")
+            logs.append("🔢 Convertendo colunas para decimal...")
+            update_logs()
+
+            if 'DURACAO_PERCEBIDA_MINUTOS' in df.columns:
+                try:
+                    df = df.with_columns(pl.col('DURACAO_PERCEBIDA_MINUTOS').cast(pl.Float64).alias('DURACAO_PERCEBIDA_MINUTOS'))
+                    logs.append("✅ DURACAO_PERCEBIDA_MINUTOS: convertido para decimal")
+                except Exception as e:
+                    logs.append(f"⚠️  DURACAO_PERCEBIDA_MINUTOS: falha na conversão - {str(e)}")
+            else:
+                logs.append("⚠️  Coluna DURACAO_PERCEBIDA_MINUTOS não encontrada")
+            update_logs()
+
+        if validar_sobreposicao:
+            logs.append("")
+            logs.append("⏰ Validando sobreposição temporal por NUM_UC_UCI...")
+            update_logs()
+
+            if 'NUM_UC_UCI' in df.columns and 'DTHR_INICIO_INTRP_UC' in df.columns and 'DATA_HORA_FIM_INT' in df.columns:
+                try:
+                    df_sorted = df.sort(['NUM_UC_UCI', 'DTHR_INICIO_INTRP_UC'])
+                    grupos_validos = []
+
+                    for _, group_df in df_sorted.group_by('NUM_UC_UCI'):
+                        group_list = group_df.rows(named=True)
+
+                        if len(group_list) == 1:
+                            grupos_validos.extend(group_list)
+                            continue
+
+                        registros_filtrados = []
+                        group_list.sort(key=lambda x: x['DTHR_INICIO_INTRP_UC'])
+
+                        for reg_atual in group_list:
+                            manter = True
+                            for reg_anterior in list(registros_filtrados):
+                                if (reg_atual['DTHR_INICIO_INTRP_UC'] < reg_anterior['DATA_HORA_FIM_INT'] and
+                                    reg_atual['DATA_HORA_FIM_INT'] > reg_anterior['DTHR_INICIO_INTRP_UC']):
+                                    dur_atual = (reg_atual['DATA_HORA_FIM_INT'] - reg_atual['DTHR_INICIO_INTRP_UC']).total_seconds() / 60
+                                    dur_anterior = (reg_anterior['DATA_HORA_FIM_INT'] - reg_anterior['DTHR_INICIO_INTRP_UC']).total_seconds() / 60
+                                    if dur_atual <= dur_anterior:
+                                        manter = False
+                                        break
+                                    registros_filtrados.remove(reg_anterior)
+                            if manter:
+                                registros_filtrados.append(reg_atual)
+
+                        grupos_validos.extend(registros_filtrados)
+
+                    df = pl.DataFrame(grupos_validos)
+                    registros_apos_sobreposicao = len(df)
+                    removidos_sobreposicao = registros_iniciais - registros_apos_sobreposicao
+                    logs.append(f"✅ Sobreposições validadas: {removidos_sobreposicao} registros removidos")
+                except Exception as e:
+                    logs.append(f"⚠️  Erro na validação de sobreposição: {str(e)}")
+            else:
+                logs.append("⚠️  Colunas necessárias não encontradas para validação de sobreposição")
+            update_logs()
+
+        if consolidar_duplicados:
+            logs.append("")
+            logs.append("🔗 Consolidando registros duplicados...")
+            update_logs()
+
+            if 'NUM_UC_UCI' in df.columns and 'NUM_INTRP_INIC_MAN' in df.columns:
+                try:
+                    registros_antes_consolidacao = len(df)
+                    df = df.unique(subset=['NUM_UC_UCI', 'NUM_INTRP_INIC_MAN'], keep='first')
+                    registros_apos_consolidacao = len(df)
+                    removidos_duplicados = registros_antes_consolidacao - registros_apos_consolidacao
+                    logs.append(f"✅ Duplicados consolidados: {removidos_duplicados} registros removidos")
+                except Exception as e:
+                    logs.append(f"⚠️  Erro na consolidação de duplicados: {str(e)}")
+            else:
+                logs.append("⚠️  Colunas necessárias não encontradas para consolidação")
+            update_logs()
+
+        logs.append("")
+        logs.append("💾 Salvando arquivo processado...")
+        update_logs()
+
+        output_path = processed_dir / "dic_fic_uc_processed.parquet"
+        df.write_parquet(output_path)
+
+        registros_finais = len(df)
+        logs.append(f"✅ Arquivo salvo: {output_path}")
+        logs.append(f"📊 Registros finais: {registros_finais:,}")
+        logs.append("")
+        logs.append("=" * 70)
+        logs.append("✅ PROCESSAMENTO CONCLUÍDO COM SUCESSO!")
+        logs.append("=" * 70)
+        update_logs()
+
+        st.success("✅ Processamento concluído com sucesso!")
+        st.info(f"📁 Arquivo processado: `{output_path}`")
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("📊 Registros Iniciais", f"{registros_iniciais:,}")
+        with col2:
+            st.metric("📊 Registros Finais", f"{registros_finais:,}")
+        with col3:
+            reducao = ((registros_iniciais - registros_finais) / registros_iniciais * 100) if registros_iniciais > 0 else 0
+            st.metric("📉 Redução", f"{reducao:.1f}%")
+
+    except Exception as e:
+        logs.append(f"❌ ERRO NO PROCESSAMENTO: {str(e)}")
+        logs.append("")
+        import traceback
+        logs.append(traceback.format_exc())
+        update_logs()
+        st.error(f"❌ Erro no processamento: {str(e)}")
 
 
 with tab3:
@@ -412,17 +611,17 @@ with tab3:
     - 📁 Salvamento em `processed/`
     """)
 
-    # Usar caminhos absolutos baseados no diretório do script
-    app_dir = Path(__file__).parent.parent
-    raw_file_path = app_dir / "data" / "raw" / "dic_fic_uc.parquet"
-    processed_dir = app_dir / "data" / "processed"
+    # Usar caminhos absolutos baseados na raiz do projeto
+    project_root = Path(__file__).resolve().parent.parent.parent
+    raw_file_path = get_raw_parquet_path(project_root)
+    processed_dir = project_root / "data" / "processed"
     processed_dir.mkdir(parents=True, exist_ok=True)
 
     # Debug: mostrar caminhos
-    st.text(f"Procurando arquivo em: {raw_file_path}")
-    st.text(f"Existe: {raw_file_path.exists()}")
+    st.text(f"Arquivo selecionado: {raw_file_path if raw_file_path else 'Nenhum arquivo .parquet encontrado em data/raw'}")
+    st.text(f"Existe: {raw_file_path.exists() if raw_file_path else False}")
 
-    if raw_file_path.exists():
+    if raw_file_path and raw_file_path.exists():
         st.success(f"✅ Arquivo encontrado: `{raw_file_path}`")
 
         # Mostrar informações básicas do arquivo
@@ -484,8 +683,8 @@ with tab3:
             st.error(f"❌ Erro ao ler arquivo Parquet: {str(e)}")
 
     else:
-        st.error(f"❌ Arquivo não encontrado: `{raw_file_path}`")
-        st.info("Execute primeiro a extração de dados na aba 'Extração SQL (Oracle)'")
+        st.error("❌ Nenhum arquivo Parquet encontrado em `data/raw`")
+        st.info("Execute primeiro a extração de dados na aba 'Extração SQL (Oracle)' ou faça upload de um arquivo Parquet.")
 
 
 def processar_dados_hcai(raw_path, processed_dir, converter_datas, converter_decimal,
