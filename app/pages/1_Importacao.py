@@ -171,7 +171,6 @@ def run_extraction_background(data_mes: str, filename: str, limit_rows):
                 pass
         with background_state_lock:
             background_extraction_state['running'] = False
-        sync_background_state_to_session()
 
 
 st.title("Importação de Dados")
@@ -339,6 +338,7 @@ with tab2:
                 limit_rows,
             )
             st.session_state.extraction_running = True
+            st.session_state.auto_refresh = True
             st.rerun()
 
     # Sincronizar estado do background thread antes de exibir
