@@ -164,3 +164,32 @@ Após extrair os dados, prossiga para o [Guia de Importação e Processamento](0
 - Validar sobreposições temporais
 - Consolidar duplicados
 - Gerar dados processados prontos para análise
+# Atualizacao 2026-04-19 - Extracao Segura Mes a Mes
+
+## Regra de execucao
+- A extracao deve processar somente 1 mes por execucao.
+- Selecoes com mais de 1 mes devem ser bloqueadas na tela.
+- Cada mes usa lock dedicado: `data/raw/dic_fic_uc_YYYYMM.lock`.
+
+## Escrita de dados brutos
+- O destino logico do bruto passa a ser particionado por mes:
+- `data/raw/dic_fic_uc/ano=YYYY/mes=MM/dic_fic_uc.parquet`
+- A escrita deve ocorrer com retry para erros de lock de arquivo no Windows (`os error 1224`).
+
+## Confiabilidade operacional
+- Importacao em background para evitar reinicio da extracao por rerun do Streamlit.
+- Nao permitir duas importacoes simultaneas para o mesmo mes.
+- A pre-visualizacao deve ser bloqueada enquanto existir lock de importacao.
+# Controle de Mes em RAW e PROCESSED
+
+## RAW (bruto)
+- O bruto deve ficar particionado por mes:
+- `data/raw/dic_fic_uc/ano=YYYY/mes=MM/dic_fic_uc.parquet`
+- RAW eh historico e imutavel por run: reprocesso do mes gera novo arquivo daquele mes.
+
+## PROCESSED (tratado)
+- O processado tambem deve ser mensal:
+- `data/processed/dic_fic_uc/ano=YYYY/mes=MM/...`
+- Regra recomendada para substituir um mes:
+- remover/apagar somente a particao daquele mes no `processed`;
+- executar novamente o tratamento apenas para o mesmo mes do `raw`.

@@ -20,3 +20,13 @@ if output_dir.exists():
         st.write("Nenhuma execução anterior encontrada.")
 else:
     st.write("Diretório de saída não encontrado.")
+try:
+    from app.services.apuracao_percebido import render_apuracao_percebido_panel
+except Exception:
+    try:
+        from services.apuracao_percebido import render_apuracao_percebido_panel
+    except Exception:
+        render_apuracao_percebido_panel = None
+
+if render_apuracao_percebido_panel is not None:
+    render_apuracao_percebido_panel()

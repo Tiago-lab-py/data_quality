@@ -126,3 +126,27 @@ if st.button("Calcular CI e CHI por SIGLA_REGIONAL", type="primary", use_contain
     indicadores_maior_igual_3.write_parquet(output_file_maior_igual_3)
     indicadores_menor_3.write_parquet(output_file_menor_3)
     st.info(f"Resultados salvos em: `{output_file_maior_igual_3}` e `{output_file_menor_3}`")
+from pathlib import Path
+
+import streamlit as st
+
+_DQ_IMPORT_LOCK = Path("D:/data_quality/data/raw/dic_fic_uc.lock")
+_DQ_MONTH_LOCKS = list(Path("D:/data_quality/data/raw").glob("dic_fic_uc_*.lock"))
+if _DQ_IMPORT_LOCK.exists() or _DQ_MONTH_LOCKS:
+    st.warning("Importação em andamento. Aguarde finalizar para abrir a prévia.")
+    st.stop()
+
+try:
+    import polars as pl
+
+    if not getattr(pl.read_parquet, "__dq_no_mmap__", False):
+        _orig_read_parquet = pl.read_parquet
+
+        def _safe_read_parquet(*args, **kwargs):  # type: ignore[no-untyped-def]
+            kwargs.setdefault("memory_map", False)
+            return _orig_read_parquet(*args, **kwargs)
+
+        setattr(_safe_read_parquet, "__dq_no_mmap__", True)
+        pl.read_parquet = _safe_read_parquet  # type: ignore[assignment]
+except Exception:
+    pass

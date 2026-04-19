@@ -2,7 +2,7 @@ SELECT
   TO_CHAR(HCAI.num_uc_hcai) AS NUM_UC_UCI,
   TO_CHAR(HCAI.indic_reg_orig_intrp_hcai) AS SIGLA_REGIONAL,
   TO_CHAR(HCAI.num_intrp_hcai) AS NUM_INTRP_UCI,
-  TO_CHAR(hcai.TIPO_PROTOC_JUSTIF_HCAI) AS TIPO_PROTOC_JUSTIF_UCI,
+  TO_CHAR(intrp_ini.TIPO_PROTOC_JUSTIF_INTRP) AS TIPO_PROTOC_JUSTIF_UCI,
   TO_CHAR(intrp_ini.data_hora_inic_intrp, 'YYYY-MM-DD HH24:MI:SS') AS DTHR_INICIO_INTRP_UC,
   TO_CHAR(intrp_fim.data_hora_fim_intrp, 'YYYY-MM-DD HH24:MI:SS') AS DATA_HORA_FIM_INTRP,
   TO_CHAR(NVL(hcai.num_intrp_inic_manobra_hcai, HCAI.num_intrp_hcai)) AS NUM_INTRP_INIC_MANOBRA_UCI,

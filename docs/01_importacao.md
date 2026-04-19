@@ -311,3 +311,45 @@ Após processar os dados:
 - [Guia de Extração Oracle](00_extracao.md)
 - [Documentação Polars](https://pola-rs.github.io/)
 - [Documentação Streamlit](https://docs.streamlit.io/)
+# Atualizacao 2026-04-19 - Fluxo de Importacao
+
+## Objetivo
+- Evitar falhas por clique/rerun do Streamlit durante a carga.
+- Garantir processamento de 1 mes por vez.
+
+## Fluxo da tela
+1. Usuario clica em `Mostrar conexao Oracle`.
+2. A tela apenas exibe os controles Oracle, sem testar automaticamente.
+3. Usuario escolhe uma acao explicita:
+4. `Testar conexao Oracle`
+5. `Iniciar importacao`
+
+## Validacoes obrigatorias
+- Antes de iniciar, validar que apenas 1 mes foi selecionado.
+- Se a selecao incluir mais de 1 mes, bloquear a execucao e exibir erro.
+
+## Persistencia do bruto
+- Gravar os dados por particao mensal:
+- `data/raw/dic_fic_uc/ano=YYYY/mes=MM/dic_fic_uc.parquet`
+- Evitar sobrescrita de meses diferentes no mesmo arquivo unico.
+- Extrair tambem o historico de UC faturada e salvar em:
+- `data/raw/UC_faturada.parquet`
+- SQL oficial:
+- `SQLs/IQS_Historico_UC_faturado.sql`
+- A tela de importacao possui acao independente:
+- `Extrair Historico UC Faturada`
+- Essa acao nao depende da importacao mensal do dic_fic_uc.
+- Conexao Oracle dessa acao: somente variaveis do `.env`
+- `ORACLE_UID`, `ORACLE_PWD`, `ORACLE_DB`, `ORACLE_LIB_DIR`, `ORACLE_CONFIG_DIR`
+
+## Convivencia com a pagina de previa
+- Enquanto existir lock de importacao (`dic_fic_uc.lock` ou `dic_fic_uc_YYYYMM.lock`), a pagina de previa deve ser interrompida.
+# Atualizacao 2026-04-19 (2) - Ajuste de UX Oracle
+
+## Mudanca aplicada
+- Botao `Mostrar conexao Oracle` removido da interface para evitar disparo indevido de teste.
+- A acao de importacao permanece explicita por botao de inicio de extracao.
+
+## Status de execucao
+- Quando a execucao eh apenas disparada pelo fluxo da pagina, a mensagem agora fica como `Extracao disparada... acompanhe no terminal`.
+- Mensagem `concluida` so deve aparecer quando o processamento realmente ficou sob controle do worker e finalizou.

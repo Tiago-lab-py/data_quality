@@ -4,75 +4,105 @@ import pandas as pd
 
 
 def _add_longa_duracao_if_possible(df: pd.DataFrame) -> pd.DataFrame:
-    if "longa_duracao" in df.columns:
-        return df
+    out = df.copy()
+
+    # Normaliza colunas percebidas para evitar nulos que quebram a apuracao.
+    fim_perc = "DATA_HORA_FIM_INTR_PERCEBIDO"
+    fim_orig_candidates = ["DATA_HORA_FIM_INTRP", "DATA_HORA_FIM_INTR", "DT_FIM"]
+    ini_perc = "DTHR_INICIO_INTRP_PERCEBIDO"
+    ini_orig_candidates = ["DTHR_INICIO_INTRP_UC", "DTHR_INICIO_INTRP", "DT_INI"]
+
+    if fim_perc in out.columns:
+        for c in fim_orig_candidates:
+            if c in out.columns:
+                out[fim_perc] = out[fim_perc].fillna(out[c])
+                break
+    if ini_perc in out.columns:
+        for c in ini_orig_candidates:
+            if c in out.columns:
+                out[ini_perc] = out[ini_perc].fillna(out[c])
+                break
+
+    if ini_perc in out.columns and fim_perc in out.columns:
+        ini_dt = pd.to_datetime(out[ini_perc], errors="coerce")
+        fim_dt = pd.to_datetime(out[fim_perc], errors="coerce")
+        if "DURACAO_PERCEBIDA_MINUTOS" in out.columns:
+            dur_calc = (fim_dt - ini_dt).dt.total_seconds().div(60.0)
+            out["DURACAO_PERCEBIDA_MINUTOS"] = out["DURACAO_PERCEBIDA_MINUTOS"].where(
+                out["DURACAO_PERCEBIDA_MINUTOS"].notna(),
+                dur_calc,
+            )
+
+    if "longa_duracao" in out.columns:
+        return out
     dur_candidates = [
         "DURACAO_PERCEBIDA_MINUTOS",
         "DURACAO_PERC_MIN",
         "DURACAO_MINUTOS",
     ]
     for col in dur_candidates:
-        if col in df.columns:
-            out = df.copy()
+        if col in out.columns:
             out["longa_duracao"] = pd.to_numeric(out[col], errors="coerce").fillna(0).ge(3)
             return out
-    return df
+    return out
 
 
-if not getattr(pd.DataFrame.to_parquet, "_dq_longa_patch", False):
-    _ORIG_TO_PARQUET = pd.DataFrame.to_parquet
+def ensure_longa_duracao_column(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Enriquecimento explícito do DataFrame em memória.
+    Nao faz escrita automática em disco durante import do módulo para evitar
+    corrupção por concorrência no Streamlit.
+    """
+    return _add_longa_duracao_if_possible(df)
 
-    def _to_parquet_with_longa(self, *args, **kwargs):
-        path = None
-        if args:
-            path = args[0]
-        elif "path" in kwargs:
-            path = kwargs["path"]
+
+def _install_safe_processed_writer_patch() -> None:
+    """
+    Patch leve e idempotente para garantir:
+    1) coluna longa_duracao no processed
+    2) escrita atomica para evitar parquet truncado/corrompido
+    """
+    if getattr(pd.DataFrame.to_parquet, "_dq_safe_processed_patch", False):
+        return
+
+    original_to_parquet = pd.DataFrame.to_parquet
+
+    def _safe_to_parquet(self, *args, **kwargs):
+        path = args[0] if args else kwargs.get("path")
+        if path is None:
+            return original_to_parquet(self, *args, **kwargs)
 
         try:
-            path_str = str(path).replace("\\", "/").lower() if path is not None else ""
+            path_str = str(path).replace("\\", "/").lower()
         except Exception:
             path_str = ""
 
-        if path_str.endswith("dic_fic_uc_processed.parquet"):
-            self = _add_longa_duracao_if_possible(self)
+        if not path_str.endswith("dic_fic_uc_processed.parquet"):
+            return original_to_parquet(self, *args, **kwargs)
 
-        return _ORIG_TO_PARQUET(self, *args, **kwargs)
+        df = _add_longa_duracao_if_possible(self)
 
-    _to_parquet_with_longa._dq_longa_patch = True
-    pd.DataFrame.to_parquet = _to_parquet_with_longa
+        from pathlib import Path
+        import uuid
 
+        final_path = Path(path)
+        tmp_path = final_path.with_name(f"{final_path.name}.tmp.{uuid.uuid4().hex}.parquet")
 
-def _ensure_processed_longa_duracao_backfill() -> None:
-    from pathlib import Path
+        new_args = list(args)
+        if new_args:
+            new_args[0] = tmp_path
+        else:
+            kwargs["path"] = tmp_path
 
-    root_dir = Path(__file__).resolve().parents[2]
-    processed_path = root_dir / "data" / "processed" / "dic_fic_uc_processed.parquet"
-    if not processed_path.exists():
-        return
+        original_to_parquet(df, *tuple(new_args), **kwargs)
+        tmp_path.replace(final_path)
+        return None
 
-    has_col = False
-    try:
-        import pyarrow.parquet as pq
-
-        has_col = "longa_duracao" in pq.ParquetFile(processed_path).schema.names
-    except Exception:
-        has_col = False
-
-    if has_col:
-        return
-
-    df = pd.read_parquet(processed_path)
-    df = _add_longa_duracao_if_possible(df)
-    if "longa_duracao" in df.columns:
-        writer = globals().get("_ORIG_TO_PARQUET", pd.DataFrame.to_parquet)
-        writer(df, processed_path, index=False)
+    _safe_to_parquet._dq_safe_processed_patch = True
+    pd.DataFrame.to_parquet = _safe_to_parquet
 
 
-try:
-    _ensure_processed_longa_duracao_backfill()
-except Exception:
-    pass
+_install_safe_processed_writer_patch()
 
 import inspect
 import re

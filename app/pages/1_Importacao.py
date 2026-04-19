@@ -893,3 +893,34 @@ def processar_dados_hcai(raw_path, processed_dir, converter_datas, converter_dec
         logs.append(traceback.format_exc())
         update_logs()
         st.error(f"❌ Erro no processamento: {str(e)}")
+import streamlit as st
+
+# Compatibilidade entre versões do Streamlit:
+# algumas usam st.experimental_rerun(), outras usam st.rerun().
+if not hasattr(st, "experimental_rerun") and hasattr(st, "rerun"):
+    st.experimental_rerun = st.rerun  # type: ignore[attr-defined]
+
+try:
+    from app.services.import_runtime import install_background_import_button, render_import_status
+except Exception:
+    try:
+        from services.import_runtime import install_background_import_button, render_import_status
+    except Exception:
+        install_background_import_button = None
+        render_import_status = None
+
+try:
+    from app.services.uc_faturada_runtime import render_uc_faturada_panel
+except Exception:
+    try:
+        from services.uc_faturada_runtime import render_uc_faturada_panel
+    except Exception:
+        render_uc_faturada_panel = None
+
+if install_background_import_button is not None:
+    install_background_import_button(globals())
+if render_import_status is not None:
+    render_import_status()
+st.caption("Regra operacional: execute a importacao de apenas 1 mes por vez.")
+if render_uc_faturada_panel is not None:
+    render_uc_faturada_panel()
