@@ -43,6 +43,7 @@ def _resolve_columns(df_cols: List[str]) -> Optional[Tuple[str, str, str, str]]:
     ]
     resolved = []
     alt = {
+        "num_intrp_inic_manobra_uci": ["num_intrp_inic_manobra_uci", "num_intrp_uci", "num_intrp"],
         "data_hora_fim_intrp": ["data_hora_fim_intrp", "data_hora_fim_intr", "dt_fim_intrp_uc"],
     }
     for r in required:
@@ -57,6 +58,23 @@ def _resolve_columns(df_cols: List[str]) -> Optional[Tuple[str, str, str, str]]:
             return None
         resolved.append(col)
     return resolved[0], resolved[1], resolved[2], resolved[3]
+
+
+def _to_datetime_expr(col_name: str) -> pl.Expr:
+    c = pl.col(col_name)
+    s = c.cast(pl.Utf8).fill_null("")
+    return pl.coalesce(
+        [
+            c.cast(pl.Datetime, strict=False),
+            s.str.strptime(pl.Datetime, "%Y-%m-%d %H:%M:%S%.f", strict=False),
+            s.str.strptime(pl.Datetime, "%Y-%m-%d %H:%M:%S", strict=False),
+            s.str.strptime(pl.Datetime, "%Y-%m-%dT%H:%M:%S%.f", strict=False),
+            s.str.strptime(pl.Datetime, "%d/%m/%Y %H:%M:%S%.f", strict=False),
+            s.str.strptime(pl.Datetime, "%d/%m/%Y %H:%M:%S", strict=False),
+            s.str.strptime(pl.Datetime, "%Y-%m-%d %H:%M", strict=False),
+            s.str.strptime(pl.Datetime, "%d/%m/%Y %H:%M", strict=False),
+        ]
+    )
 
 
 def _mark_file(path: Path) -> Dict[str, object]:
@@ -80,8 +98,8 @@ def _mark_file(path: Path) -> Dict[str, object]:
             [
                 pl.col(col_cliente).cast(pl.Utf8).alias("__cliente"),
                 pl.col(col_intrp).cast(pl.Utf8).alias("__intrp"),
-                pl.col(col_ini).cast(pl.Datetime, strict=False).alias("__ini"),
-                pl.col(col_fim).cast(pl.Datetime, strict=False).alias("__fim"),
+                _to_datetime_expr(col_ini).alias("__ini"),
+                _to_datetime_expr(col_fim).alias("__fim"),
             ]
         )
         .sort(["__cliente", "__ini", "__fim", "__intrp"])
@@ -187,11 +205,11 @@ def _mark_file(path: Path) -> Dict[str, object]:
                 .alias("NUM_INTRP_PERCEBIDA"),
                 pl.when(pl.col("verificado"))
                 .then(pl.col("__ini_percebido"))
-                .otherwise(pl.col(col_ini).cast(pl.Datetime, strict=False))
+                .otherwise(pl.col("__ini"))
                 .alias("DTHR_INICIO_INTRP_PERCEBIDO"),
                 pl.when(pl.col("verificado"))
                 .then(pl.col("__fim_percebido"))
-                .otherwise(pl.col(col_fim).cast(pl.Datetime, strict=False))
+                .otherwise(pl.col("__fim"))
                 .alias("DATA_HORA_FIM_INTR_PERCEBIDO"),
                 pl.when(pl.col("verificado"))
                 .then(((pl.col("__fim_percebido") - pl.col("__ini_percebido")).dt.total_seconds() / 60.0))
@@ -202,9 +220,16 @@ def _mark_file(path: Path) -> Dict[str, object]:
         .with_columns(
             [
                 pl.col("NUM_INTRP_PERCEBIDA").fill_null(pl.col(col_intrp).cast(pl.Utf8)),
-                pl.col("DTHR_INICIO_INTRP_PERCEBIDO").fill_null(pl.col(col_ini).cast(pl.Datetime, strict=False)),
-                pl.col("DATA_HORA_FIM_INTR_PERCEBIDO").fill_null(pl.col(col_fim).cast(pl.Datetime, strict=False)),
+                pl.col("DTHR_INICIO_INTRP_PERCEBIDO").fill_null(pl.col("__ini")),
+                pl.col("DATA_HORA_FIM_INTR_PERCEBIDO").fill_null(pl.col("__fim")),
                 pl.col("DURACAO_PERCEBIDA_MINUTOS").fill_null(pl.col("__dur_min")).fill_null(0.0),
+            ]
+        )
+        .with_columns(
+            [
+                # Compatibilidade com pipelines que usam sufixo PERCEBIDA
+                pl.col("DTHR_INICIO_INTRP_PERCEBIDO").alias("DTHR_INICIO_INTRP_PERCEBIDA"),
+                pl.col("DATA_HORA_FIM_INTR_PERCEBIDO").alias("DATA_HORA_FIM_INTR_PERCEBIDA"),
             ]
         )
         .sort("__rid")
@@ -254,6 +279,22 @@ def _mark_file(path: Path) -> Dict[str, object]:
         "col_ini": col_ini,
         "col_fim": col_fim,
     }
+
+
+def _safe_mark_file(path: Path) -> Dict[str, object]:
+    try:
+        return _mark_file(path)
+    except Exception as e:
+        return {
+            "arquivo": str(path),
+            "status": "erro",
+            "mensagem": str(e),
+            "total": 0,
+            "verificado_true": 0,
+            "contido_true": 0,
+            "sobreposto_true": 0,
+            "conta_unico_true": 0,
+        }
 
 
 def _collect_contained_sample(paths: List[Path], max_rows: int) -> pl.DataFrame:
@@ -335,13 +376,24 @@ def render_interruptions_overlap_panel() -> None:
         rows = []
         with st.spinner("Processando arquivos e gravando colunas de verificacao..."):
             for p in files:
-                rows.append(_mark_file(p))
+                rows.append(_safe_mark_file(p))
 
         result_df = pl.DataFrame(rows)
         st.session_state[RESULT_KEY] = result_df
 
         sample_df = _collect_contained_sample(files, int(max_sample))
         st.session_state[SAMPLE_KEY] = sample_df
+
+        ok_count = int(result_df.filter(pl.col("status") == "ok").height) if not result_df.is_empty() else 0
+        err_count = int(result_df.filter(pl.col("status") == "erro").height) if not result_df.is_empty() else 0
+        missing_count = int(result_df.filter(pl.col("status") == "colunas_ausentes").height) if not result_df.is_empty() else 0
+        if ok_count > 0:
+            st.success(f"Colunas de qualidade gravadas em {ok_count} arquivo(s).")
+        if err_count > 0 or missing_count > 0:
+            st.warning(
+                f"Arquivos com problema: erro={err_count}, colunas_ausentes={missing_count}. "
+                "Veja o resumo abaixo."
+            )
 
     result = st.session_state.get(RESULT_KEY)
     sample = st.session_state.get(SAMPLE_KEY)

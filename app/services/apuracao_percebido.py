@@ -6,8 +6,32 @@ import polars as pl
 import streamlit as st
 
 
-PROCESSED_BASE = Path("D:/data_quality/data/processed")
-UC_FATURADA_PATH = Path("D:/data_quality/data/raw/UC_faturada.parquet")
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_LEGACY_ROOT = Path("D:/data_quality")
+
+if not hasattr(st, "rerun") and hasattr(st, "experimental_rerun"):
+    st.rerun = st.experimental_rerun  # type: ignore[attr-defined]
+
+
+def _resolve_existing_path(candidates: List[Path]) -> Path:
+    for p in candidates:
+        if p.exists():
+            return p
+    return candidates[0]
+
+
+PROCESSED_BASE = _resolve_existing_path(
+    [
+        _PROJECT_ROOT / "data" / "processed",
+        _LEGACY_ROOT / "data" / "processed",
+    ]
+)
+UC_FATURADA_PATH = _resolve_existing_path(
+    [
+        _PROJECT_ROOT / "data" / "raw" / "UC_faturada.parquet",
+        _LEGACY_ROOT / "data" / "raw" / "UC_faturada.parquet",
+    ]
+)
 
 
 def _discover_processed_files() -> List[str]:
@@ -80,13 +104,92 @@ def _month_expr(col_name: str, dtype: object) -> pl.Expr:
 
 
 def _has_percebido_cols(files: List[str]) -> bool:
-    schema = dict(pl.scan_parquet(files).collect_schema())
-    cols = {c.lower() for c in schema.keys()}
-    has_intrp = "num_intrp_percebida" in cols
-    has_ini = "dthr_inicio_intrp_percebido" in cols
-    has_fim = ("data_hora_fim_intrp_percebido" in cols) or ("data_hora_fim_intr_percebido" in cols)
-    has_dur = "duracao_percebida_minutos" in cols
-    return has_intrp and has_ini and has_fim and has_dur
+    required = {
+        "num_intrp_percebida",
+        "dthr_inicio_intrp_percebido",
+        "duracao_percebida_minutos",
+    }
+    fim_opts = {"data_hora_fim_intrp_percebido", "data_hora_fim_intr_percebido"}
+    for f in files:
+        try:
+            schema = dict(pl.scan_parquet([f]).collect_schema())
+            cols = {c.lower() for c in schema.keys()}
+            if required.issubset(cols) and len(fim_opts.intersection(cols)) > 0:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _files_with_percebido_cols(files: List[str]) -> List[str]:
+    out: List[str] = []
+    required = {
+        "num_intrp_percebida",
+        "dthr_inicio_intrp_percebido",
+        "duracao_percebida_minutos",
+    }
+    fim_opts = {"data_hora_fim_intrp_percebido", "data_hora_fim_intr_percebido"}
+    for f in files:
+        try:
+            schema = dict(pl.scan_parquet([f]).collect_schema())
+            cols = {c.lower() for c in schema.keys()}
+            if required.issubset(cols) and len(fim_opts.intersection(cols)) > 0:
+                out.append(f)
+        except Exception:
+            continue
+    return out
+
+
+def _materialize_percebido_columns(files: List[str]) -> Tuple[bool, str]:
+    try:
+        from app.services.quality_interruptions import _safe_mark_file
+    except Exception:
+        try:
+            from services.quality_interruptions import _safe_mark_file
+        except Exception as e:
+            return False, f"Nao foi possivel importar materializacao de qualidade: {e}"
+
+    ok = 0
+    errs = 0
+    missing = 0
+    for f in files:
+        res = _safe_mark_file(Path(f))
+        status = str(res.get("status", ""))
+        if status == "ok":
+            ok += 1
+        elif status == "colunas_ausentes":
+            missing += 1
+        else:
+            errs += 1
+
+    if ok > 0:
+        return True, (
+            f"Materializacao concluida. Arquivos ok={ok}, "
+            f"colunas_ausentes={missing}, erros={errs}."
+        )
+    return False, (
+        f"Nenhum arquivo foi materializado. "
+        f"colunas_ausentes={missing}, erros={errs}."
+    )
+
+
+def _available_months_in_processed(files: List[str]) -> List[str]:
+    try:
+        schema = dict(pl.scan_parquet(files).collect_schema())
+        col_ini = _resolve_col(schema, ["DTHR_INICIO_INTRP_PERCEBIDO", "DTHR_INICIO_INTRP_UC"])
+        if not col_ini:
+            return []
+        months = (
+            pl.scan_parquet(files)
+            .select(_month_expr(col_ini, schema[col_ini]).alias("__ANOMES"))
+            .filter(pl.col("__ANOMES").is_not_null())
+            .unique()
+            .sort("__ANOMES", descending=True)
+            .collect()
+        )
+        return [str(x) for x in months["__ANOMES"].to_list()]
+    except Exception:
+        return []
 
 
 def _prepare_processed_for_month(files: List[str], anomes: str, uc_map: pl.DataFrame) -> Tuple[Optional[pl.DataFrame], Optional[str]]:
@@ -97,12 +200,14 @@ def _prepare_processed_for_month(files: List[str], anomes: str, uc_map: pl.DataF
     col_uc = _resolve_col(schema, ["NUM_UC_UCI"])
     col_intrp = _resolve_col(schema, ["NUM_INTRP_PERCEBIDA"])
     col_justif = _resolve_col(schema, ["TIPO_PROTOC_JUSTIF_UCI", "TIPO_PROTOC_JUSTIF_UC"])
-    col_ini = _resolve_col(schema, ["DTHR_INICIO_INTRP_PERCEBIDO"])
+    col_ini = _resolve_col(schema, ["DTHR_INICIO_INTRP_PERCEBIDO", "DTHR_INICIO_INTRP_PERCEBIDA"])
     col_fim = _resolve_col(
         schema,
         [
             "DATA_HORA_FIM_INTRP_PERCEBIDO",
             "DATA_HORA_FIM_INTR_PERCEBIDO",
+            "DATA_HORA_FIM_INTRP_PERCEBIDA",
+            "DATA_HORA_FIM_INTR_PERCEBIDA",
         ],
     )
     col_dur = _resolve_col(schema, ["DURACAO_PERCEBIDA_MINUTOS"])
@@ -121,6 +226,20 @@ def _prepare_processed_for_month(files: List[str], anomes: str, uc_map: pl.DataF
     lf = pl.scan_parquet(files)
     month_col = _month_expr(col_ini, schema[col_ini]).alias("__ANOMES")
     dur_expr = pl.col(col_dur).cast(pl.Float64, strict=False).fill_null(0.0)
+    verif_raw = pl.col(col_verif)
+    verif_expr = (
+        pl.when(verif_raw.cast(pl.Boolean, strict=False).is_not_null())
+        .then(verif_raw.cast(pl.Boolean, strict=False))
+        .otherwise(
+            verif_raw.cast(pl.Utf8)
+            .fill_null("")
+            .str.to_lowercase()
+            .str.strip_chars()
+            .is_in(["true", "1", "sim", "yes", "y"])
+        )
+        .fill_null(False)
+        .alias("VERIFICADO")
+    )
 
     if col_regional_total:
         regional_expr = pl.col(col_regional_total).cast(pl.Utf8).fill_null("SEM_REGIONAL").alias("REGIONAL_TOTAL")
@@ -132,7 +251,7 @@ def _prepare_processed_for_month(files: List[str], anomes: str, uc_map: pl.DataF
                 pl.col(col_intrp).cast(pl.Utf8).alias("NUM_INTRP_PERCEBIDA"),
                 dur_expr.alias("DUR_MIN"),
                 pl.col(col_justif).cast(pl.Utf8).fill_null("").alias("TIPO_PROTOC_JUSTIF_UCI"),
-                pl.col(col_verif).cast(pl.Boolean).fill_null(False).alias("VERIFICADO"),
+                verif_expr,
             ]
         )
     else:
@@ -150,7 +269,7 @@ def _prepare_processed_for_month(files: List[str], anomes: str, uc_map: pl.DataF
                     pl.col(col_intrp).cast(pl.Utf8).alias("NUM_INTRP_PERCEBIDA"),
                     dur_expr.alias("DUR_MIN"),
                     pl.col(col_justif).cast(pl.Utf8).fill_null("").alias("TIPO_PROTOC_JUSTIF_UCI"),
-                    pl.col(col_verif).cast(pl.Boolean).fill_null(False).alias("VERIFICADO"),
+                    verif_expr,
                 ]
             )
             .join(mapping.lazy(), on="SIGLA_REGIONAL", how="left")
@@ -166,11 +285,13 @@ def _prepare_processed_for_month(files: List[str], anomes: str, uc_map: pl.DataF
             & pl.col("NUM_INTRP_PERCEBIDA").is_not_null()
             & (pl.col("NUM_INTRP_PERCEBIDA") != "")
             & (pl.col("VERIFICADO") == True)
+            & (pl.col("DUR_MIN") >= 3.0)
         )
     )
 
     # Consolida no nivel da interrupcao percebida para evitar duplicidade
     # (ex.: mesma UC + interrupcao aparecendo em mais de uma linha).
+    # Nesta apuracao, consideramos apenas interrupcoes longas (>= 3 min).
     # A classificacao LIQUIDO/EXPURGO eh aplicada apos consolidacao.
     unique_base = (
         base.group_by(["REGIONAL_TOTAL", "NUM_UC_UCI", "NUM_INTRP_PERCEBIDA"])
@@ -184,7 +305,7 @@ def _prepare_processed_for_month(files: List[str], anomes: str, uc_map: pl.DataF
 
     unique_intrp = (
         unique_base.with_columns(
-            pl.when(pl.col("TIPO_0_ALL") & (pl.col("DUR_MIN") >= 3.0))
+            pl.when(pl.col("TIPO_0_ALL"))
             .then(pl.lit("LIQUIDO"))
             .otherwise(pl.lit("EXPURGO"))
             .alias("NATUREZA")
@@ -317,6 +438,41 @@ def _to_table(unique_intrp: pl.DataFrame, uc_mes: pl.DataFrame) -> pl.DataFrame:
     return out.with_columns(
         pl.when(pl.col("REGIONAL_TOTAL") == "COPEL").then(1).otherwise(0).alias("__ord_copel")
     ).sort(["__ord_copel", "REGIONAL_TOTAL"]).drop("__ord_copel")
+
+
+def _duration_stats_by_regional(unique_intrp: pl.DataFrame) -> pl.DataFrame:
+    if unique_intrp.is_empty():
+        return pl.DataFrame(
+            {
+                "REGIONAL_TOTAL": [],
+                "QTD_INTRP": [],
+                "DUR_MEDIANA_H": [],
+                "DUR_P95_H": [],
+                "DUR_P99_H": [],
+                "DUR_MAX_H": [],
+            }
+        )
+    return (
+        unique_intrp.group_by("REGIONAL_TOTAL")
+        .agg(
+            [
+                pl.len().alias("QTD_INTRP"),
+                (pl.col("DUR_MIN").median() / 60.0).alias("DUR_MEDIANA_H"),
+                (pl.col("DUR_MIN").quantile(0.95) / 60.0).alias("DUR_P95_H"),
+                (pl.col("DUR_MIN").quantile(0.99) / 60.0).alias("DUR_P99_H"),
+                (pl.col("DUR_MIN").max() / 60.0).alias("DUR_MAX_H"),
+            ]
+        )
+        .with_columns(
+            [
+                pl.col("DUR_MEDIANA_H").round(2),
+                pl.col("DUR_P95_H").round(2),
+                pl.col("DUR_P99_H").round(2),
+                pl.col("DUR_MAX_H").round(2),
+            ]
+        )
+        .sort("REGIONAL_TOTAL")
+    )
 
 
 def _fmt_num(value: object, dec: int = 2) -> str:
@@ -500,11 +656,59 @@ def _render_charts(table: pl.DataFrame) -> None:
         st.bar_chart(fec_df)
 
 
+def _has_percebido_cols(files: List[str]) -> bool:
+    required = {
+        "num_intrp_percebida",
+        "duracao_percebida_minutos",
+    }
+    ini_opts = {"dthr_inicio_intrp_percebido", "dthr_inicio_intrp_percebida"}
+    fim_opts = {
+        "data_hora_fim_intrp_percebido",
+        "data_hora_fim_intr_percebido",
+        "data_hora_fim_intrp_percebida",
+        "data_hora_fim_intr_percebida",
+    }
+    for f in files:
+        try:
+            schema = dict(pl.scan_parquet([f]).collect_schema())
+            cols = {c.lower() for c in schema.keys()}
+            if required.issubset(cols) and len(ini_opts.intersection(cols)) > 0 and len(fim_opts.intersection(cols)) > 0:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _files_with_percebido_cols(files: List[str]) -> List[str]:
+    out: List[str] = []
+    required = {
+        "num_intrp_percebida",
+        "duracao_percebida_minutos",
+    }
+    ini_opts = {"dthr_inicio_intrp_percebido", "dthr_inicio_intrp_percebida"}
+    fim_opts = {
+        "data_hora_fim_intrp_percebido",
+        "data_hora_fim_intr_percebido",
+        "data_hora_fim_intrp_percebida",
+        "data_hora_fim_intr_percebida",
+    }
+    for f in files:
+        try:
+            schema = dict(pl.scan_parquet([f]).collect_schema())
+            cols = {c.lower() for c in schema.keys()}
+            if required.issubset(cols) and len(ini_opts.intersection(cols)) > 0 and len(fim_opts.intersection(cols)) > 0:
+                out.append(f)
+        except Exception:
+            continue
+    return out
+
+
 def render_apuracao_percebido_panel() -> None:
     st.subheader("DEC/FEC para visao geografica - Regionais")
     st.caption(
         "BRUTO = LIQUIDO + EXPURGO. DEC = CHI/UC_faturada. FEC = CI/UC_faturada. "
-        "Regra LIQUIDO: TIPO_PROTOC_JUSTIF_UCI='0' e DURACAO >= 3 minutos."
+        "Nesta apuracao, LIQUIDO e BRUTO consideram apenas interrupcoes longas (DURACAO >= 3 min). "
+        "Regra LIQUIDO: TIPO_PROTOC_JUSTIF_UCI='0'."
     )
 
     uc_df, uc_err = _load_uc_faturada()
@@ -521,6 +725,14 @@ def render_apuracao_percebido_panel() -> None:
         return
 
     anomes = st.selectbox("Periodo (ANOMES)", options=months, index=0, key="_dq_apuracao_anomes")
+    dur_max_h = st.number_input(
+        "Filtro opcional de duracao maxima (horas, 0 = sem filtro)",
+        min_value=0.0,
+        max_value=720.0,
+        value=0.0,
+        step=1.0,
+        key="_dq_apuracao_dur_max_h",
+    )
     files = _discover_processed_files()
     if not files:
         st.warning("Nenhum processed encontrado.")
@@ -528,9 +740,25 @@ def render_apuracao_percebido_panel() -> None:
 
     if not _has_percebido_cols(files):
         st.error(
-            "Apuracao em modo estritamente PERCEBIDO: faltam colunas percebidas no processed. "
-            "Rode primeiro em 3_Qualidade_dados a acao 'Verificar sobreposicao e gravar colunas'."
+            "Apuracao em modo estritamente PERCEBIDO: faltam colunas percebidas no processed."
         )
+        st.caption(
+            "Use a opcao abaixo para gravar automaticamente as colunas de qualidade "
+            "ou rode em 3_Qualidade_dados: 'Verificar sobreposicao e gravar colunas'."
+        )
+        if st.button("Gravar colunas de qualidade agora", key="_dq_apuracao_materializar"):
+            with st.spinner("Materializando colunas percebidas no processed..."):
+                ok, msg = _materialize_percebido_columns(files)
+            if ok:
+                st.success(msg)
+                st.rerun()
+            else:
+                st.error(msg)
+        return
+
+    files = _files_with_percebido_cols(files)
+    if not files:
+        st.error("Nao encontrei arquivos processed com colunas percebidas apos a filtragem.")
         return
 
     if st.button("Calcular DEC/FEC", key="_dq_apuracao_run"):
@@ -540,18 +768,59 @@ def render_apuracao_percebido_panel() -> None:
             if err:
                 st.session_state["_dq_apuracao_err"] = err
                 st.session_state["_dq_apuracao_table"] = pl.DataFrame()
+                st.session_state["_dq_apuracao_stats"] = pl.DataFrame()
+                st.session_state["_dq_apuracao_top_nrt"] = pl.DataFrame()
+                st.session_state["_dq_apuracao_top_nro"] = pl.DataFrame()
             elif unique_intrp is None or unique_intrp.is_empty():
-                st.session_state["_dq_apuracao_err"] = "Sem dados de interrupcao para o periodo."
+                meses_proc = _available_months_in_processed(files)
+                meses_hint = ", ".join(meses_proc[:8]) if meses_proc else "nao identificado"
+                st.session_state["_dq_apuracao_err"] = (
+                    "Sem dados de interrupcao longa (>=3 min) para o periodo selecionado "
+                    f"({anomes}). Meses detectados no processed: {meses_hint}."
+                )
                 st.session_state["_dq_apuracao_table"] = pl.DataFrame()
+                st.session_state["_dq_apuracao_stats"] = pl.DataFrame()
+                st.session_state["_dq_apuracao_top_nrt"] = pl.DataFrame()
+                st.session_state["_dq_apuracao_top_nro"] = pl.DataFrame()
             else:
+                if float(dur_max_h) > 0:
+                    before = unique_intrp.height
+                    unique_intrp = unique_intrp.filter(pl.col("DUR_MIN") <= float(dur_max_h) * 60.0)
+                    removed = before - unique_intrp.height
+                    st.session_state["_dq_apuracao_info"] = (
+                        f"Filtro de duracao aplicado ({dur_max_h:.0f}h). Linhas removidas: {removed:,}."
+                    ).replace(",", ".")
+                else:
+                    st.session_state["_dq_apuracao_info"] = ""
+
                 table = _to_table(unique_intrp, uc_mes)
                 st.session_state["_dq_apuracao_err"] = ""
                 st.session_state["_dq_apuracao_table"] = table
+                st.session_state["_dq_apuracao_stats"] = _duration_stats_by_regional(unique_intrp)
+                st.session_state["_dq_apuracao_top_nrt"] = (
+                    unique_intrp.filter(pl.col("REGIONAL_TOTAL") == "NRT")
+                    .sort("DUR_MIN", descending=True)
+                    .head(100)
+                    .select(["REGIONAL_TOTAL", "NUM_UC_UCI", "NUM_INTRP_PERCEBIDA", "DUR_MIN", "NATUREZA"])
+                    .with_columns((pl.col("DUR_MIN") / 60.0).round(2).alias("DUR_H"))
+                    .drop("DUR_MIN")
+                )
+                st.session_state["_dq_apuracao_top_nro"] = (
+                    unique_intrp.filter(pl.col("REGIONAL_TOTAL") == "NRO")
+                    .sort("DUR_MIN", descending=True)
+                    .head(100)
+                    .select(["REGIONAL_TOTAL", "NUM_UC_UCI", "NUM_INTRP_PERCEBIDA", "DUR_MIN", "NATUREZA"])
+                    .with_columns((pl.col("DUR_MIN") / 60.0).round(2).alias("DUR_H"))
+                    .drop("DUR_MIN")
+                )
 
     err = st.session_state.get("_dq_apuracao_err", "")
     if err:
         st.error(str(err))
         return
+    info = st.session_state.get("_dq_apuracao_info", "")
+    if info:
+        st.info(str(info))
 
     table = st.session_state.get("_dq_apuracao_table")
     if not isinstance(table, pl.DataFrame):
@@ -603,13 +872,30 @@ def render_apuracao_percebido_panel() -> None:
             use_container_width=True,
         )
 
+    stats = st.session_state.get("_dq_apuracao_stats")
+    top_nrt = st.session_state.get("_dq_apuracao_top_nrt")
+    top_nro = st.session_state.get("_dq_apuracao_top_nro")
+    with st.expander("Diagnostico de duracao (NRT x NRO)"):
+        if isinstance(stats, pl.DataFrame) and not stats.is_empty():
+            st.write("Resumo de duracao por regional (horas)")
+            st.dataframe(
+                stats.filter(pl.col("REGIONAL_TOTAL").is_in(["NRT", "NRO"])),
+                use_container_width=True,
+            )
+        if isinstance(top_nrt, pl.DataFrame) and not top_nrt.is_empty():
+            st.write("Top 100 maiores duracoes - NRT")
+            st.dataframe(top_nrt, use_container_width=True)
+        if isinstance(top_nro, pl.DataFrame) and not top_nro.is_empty():
+            st.write("Top 100 maiores duracoes - NRO")
+            st.dataframe(top_nro, use_container_width=True)
+
     _render_charts(table)
 def _dq_fix_processed_for_apuracao(df):
     import pandas as _pd
 
     out = df.copy()
-    fim_perc = "DATA_HORA_FIM_INTR_PERCEBIDO"
-    ini_perc = "DTHR_INICIO_INTRP_PERCEBIDO"
+    fim_perc = "DATA_HORA_FIM_INTR_PERCEBIDO" if "DATA_HORA_FIM_INTR_PERCEBIDO" in out.columns else "DATA_HORA_FIM_INTR_PERCEBIDA"
+    ini_perc = "DTHR_INICIO_INTRP_PERCEBIDO" if "DTHR_INICIO_INTRP_PERCEBIDO" in out.columns else "DTHR_INICIO_INTRP_PERCEBIDA"
 
     if fim_perc in out.columns:
         for c in ("DATA_HORA_FIM_INTRP", "DATA_HORA_FIM_INTR", "DT_FIM"):
@@ -643,6 +929,12 @@ def _dq_fix_processed_for_apuracao(df):
             if c in out.columns:
                 out["NUM_INTRP_PERCEBIDA"] = out["NUM_INTRP_PERCEBIDA"].fillna(out[c])
                 break
+
+    # Compatibilidade de nomenclatura percebido/percebida
+    if "DTHR_INICIO_INTRP_PERCEBIDO" in out.columns and "DTHR_INICIO_INTRP_PERCEBIDA" not in out.columns:
+        out["DTHR_INICIO_INTRP_PERCEBIDA"] = out["DTHR_INICIO_INTRP_PERCEBIDO"]
+    if "DATA_HORA_FIM_INTR_PERCEBIDO" in out.columns and "DATA_HORA_FIM_INTR_PERCEBIDA" not in out.columns:
+        out["DATA_HORA_FIM_INTR_PERCEBIDA"] = out["DATA_HORA_FIM_INTR_PERCEBIDO"]
 
     if "verificado" in out.columns:
         v = out["verificado"]

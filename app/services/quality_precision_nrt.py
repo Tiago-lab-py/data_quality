@@ -105,7 +105,11 @@ def _to_datetime_expr(col_name: str) -> pl.Expr:
     )
 
 
-def _build_metrics(files: List[str], forced_cols: Optional[Dict[str, str]] = None) -> tuple[pl.DataFrame, pl.DataFrame]:
+def _build_metrics(
+    files: List[str],
+    forced_cols: Optional[Dict[str, str]] = None,
+    sample_only_nrt: bool = False,
+) -> tuple[pl.DataFrame, pl.DataFrame]:
     schema = dict(pl.scan_parquet(files).collect_schema())
     col_uc = forced_cols.get("uc") if forced_cols else None
     col_intrp = forced_cols.get("intrp") if forced_cols else None
@@ -118,10 +122,20 @@ def _build_metrics(files: List[str], forced_cols: Optional[Dict[str, str]] = Non
     col_intrp = col_intrp or _resolve_col(schema, ["NUM_INTRP_INIC_MANOBRA_UCI", "NUM_INTRP_PERCEBIDA"]) or _resolve_col_fuzzy(
         schema, ["num", "intrp"]
     )
-    col_ini = col_ini or _resolve_col(schema, ["DTHR_INICIO_INTRP_UC", "DTHR_INICIO_INTRP_PERCEBIDO"]) or _resolve_col_fuzzy(
+    col_ini = col_ini or _resolve_col(
+        schema,
+        ["DTHR_INICIO_INTRP_UC", "DTHR_INICIO_INTRP_PERCEBIDO", "DTHR_INICIO_INTRP_PERCEBIDA"],
+    ) or _resolve_col_fuzzy(
         schema, ["inicio"], ["intrp", "intr", "interrup"]
     )
-    col_fim = col_fim or _resolve_col(schema, ["DATA_HORA_FIM_INTR", "DATA_HORA_FIM_INTR_PERCEBIDO"]) or _resolve_col_fuzzy(
+    col_fim = col_fim or _resolve_col(
+        schema,
+        [
+            "DATA_HORA_FIM_INTR",
+            "DATA_HORA_FIM_INTR_PERCEBIDO",
+            "DATA_HORA_FIM_INTR_PERCEBIDA",
+        ],
+    ) or _resolve_col_fuzzy(
         schema, ["fim"], ["intrp", "intr", "interrup"]
     )
 
@@ -257,11 +271,16 @@ def _build_metrics(files: List[str], forced_cols: Optional[Dict[str, str]] = Non
         .collect()
     )
 
-    amostra_nrt = (
-        lf.filter(pl.col("REGIONAL_TOTAL") == "NRT")
-        .filter(pl.col("MERGE_CRITERIO") == True)
-        .select(
+    amostra_lf = lf.filter(pl.col("MERGE_CRITERIO") == True)
+    if sample_only_nrt:
+        amostra_lf = amostra_lf.filter(
+            (pl.col("REGIONAL_TOTAL") == "NRT") | (pl.col("REGIONAL_TOTAL") == "L")
+        )
+
+    amostra_merge = (
+        amostra_lf.select(
             [
+                "REGIONAL_TOTAL",
                 "NUM_UC_UCI",
                 "NUM_INTRP",
                 "DT_INI",
@@ -277,14 +296,14 @@ def _build_metrics(files: List[str], forced_cols: Optional[Dict[str, str]] = Non
         .head(500)
         .collect()
     )
-    return resumo, amostra_nrt
+    return resumo, amostra_merge
 
 
 def render_nrt_precision_panel() -> None:
-    st.subheader("Verificacao NRT - Precisao de Segundos")
+    st.subheader("Verificacao de Precisao de Segundos")
     st.caption(
-        "Analisa impacto da precisao de segundos na regra de merge (<1 minuto) por UC. "
-        "Compara criterio atual vs timestamps truncados para minuto."
+        "Analisa impacto da precisao de segundos na regra de merge (<1 minuto) por UC, "
+        "considerando todas as regionais. Compara criterio atual vs timestamps truncados para minuto."
     )
 
     files = _discover_processed_files()
@@ -303,6 +322,11 @@ def render_nrt_precision_panel() -> None:
         col_fim_m = st.selectbox("Coluna fim", options=[""] + all_cols, index=0, key="_dq_nrt_m_fim")
         col_reg_total_m = st.selectbox("Coluna REGIONAL_TOTAL", options=[""] + all_cols, index=0, key="_dq_nrt_m_reg_total")
         col_reg_sigla_m = st.selectbox("Coluna SIGLA_REGIONAL", options=[""] + all_cols, index=0, key="_dq_nrt_m_reg_sigla")
+        sample_only_nrt = st.checkbox(
+            "Limitar amostra de registros para NRT",
+            value=False,
+            key="_dq_nrt_sample_only_nrt",
+        )
 
     forced_cols = {
         "uc": col_uc_m,
@@ -314,9 +338,13 @@ def render_nrt_precision_panel() -> None:
     }
     forced_cols = {k: v for k, v in forced_cols.items() if v}
 
-    if st.button("Rodar verificacao de precisao (NRT)", key="_dq_nrt_precision_run"):
+    if st.button("Rodar verificacao de precisao (todas regionais)", key="_dq_nrt_precision_run"):
         with st.spinner("Calculando metricas de precisao temporal..."):
-            resumo, amostra = _build_metrics(files, forced_cols=forced_cols if forced_cols else None)
+            resumo, amostra = _build_metrics(
+                files,
+                forced_cols=forced_cols if forced_cols else None,
+                sample_only_nrt=bool(sample_only_nrt),
+            )
             st.session_state["_dq_nrt_precision_resumo"] = resumo
             st.session_state["_dq_nrt_precision_amostra"] = amostra
 
@@ -327,10 +355,16 @@ def render_nrt_precision_panel() -> None:
                 col_intrp = _resolve_col(schema, ["NUM_INTRP_INIC_MANOBRA_UCI", "NUM_INTRP_PERCEBIDA"]) or _resolve_col_fuzzy(
                     schema, ["num", "intrp"]
                 )
-                col_ini = _resolve_col(schema, ["DTHR_INICIO_INTRP_UC", "DTHR_INICIO_INTRP_PERCEBIDO"]) or _resolve_col_fuzzy(
+                col_ini = _resolve_col(
+                    schema,
+                    ["DTHR_INICIO_INTRP_UC", "DTHR_INICIO_INTRP_PERCEBIDO", "DTHR_INICIO_INTRP_PERCEBIDA"],
+                ) or _resolve_col_fuzzy(
                     schema, ["inicio"], ["intrp", "intr", "interrup"]
                 )
-                col_fim = _resolve_col(schema, ["DATA_HORA_FIM_INTR", "DATA_HORA_FIM_INTR_PERCEBIDO"]) or _resolve_col_fuzzy(
+                col_fim = _resolve_col(
+                    schema,
+                    ["DATA_HORA_FIM_INTR", "DATA_HORA_FIM_INTR_PERCEBIDO", "DATA_HORA_FIM_INTR_PERCEBIDA"],
+                ) or _resolve_col_fuzzy(
                     schema, ["fim"], ["intrp", "intr", "interrup"]
                 )
                 col_reg = _resolve_col(schema, ["REGIONAL_TOTAL", "SIGLA_REGIONAL"])
@@ -358,25 +392,21 @@ def render_nrt_precision_panel() -> None:
         st.write("Comparativo por regional")
         st.dataframe(resumo, use_container_width=True)
 
-        nrt = resumo.filter(pl.col("REGIONAL_TOTAL") == "NRT")
-        if nrt.is_empty():
-            nrt = resumo.filter(pl.col("REGIONAL_TOTAL") == "L")
-        if nrt.height:
-            r = nrt.to_dicts()[0]
-            st.info(
-                f"{r.get('REGIONAL_TOTAL', 'NRT')}: "
-                f"{int(r['MERGE_CRITERIO'])} merges pelo criterio atual vs "
-                f"{int(r['MERGE_CRITERIO_MINUTO'])} com truncamento em minuto "
-                f"(delta={int(r['DELTA_MERGE_SEGUNDO'])})."
-            )
+        total_merge_atual = int(resumo["MERGE_CRITERIO"].sum()) if resumo.height else 0
+        total_merge_min = int(resumo["MERGE_CRITERIO_MINUTO"].sum()) if resumo.height else 0
+        delta_total = total_merge_atual - total_merge_min
+        st.info(
+            f"Total geral: {total_merge_atual} merges pelo criterio atual vs "
+            f"{total_merge_min} com truncamento em minuto (delta={delta_total})."
+        )
         diag = st.session_state.get("_dq_nrt_precision_diag", {})
         if isinstance(diag, dict) and diag:
             with st.expander("Diagnostico de colunas usadas"):
                 st.json(diag)
 
     if isinstance(amostra, pl.DataFrame):
-        st.write("Amostra NRT de registros afetados pela regra de merge (<1 minuto)")
+        st.write("Amostra de registros afetados pela regra de merge (<1 minuto)")
         if amostra.is_empty():
-            st.success("Nao houve casos de merge em NRT com os dados atuais.")
+            st.success("Nao houve casos de merge no escopo analisado.")
         else:
             st.dataframe(amostra, use_container_width=True)
